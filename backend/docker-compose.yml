@@ -47,6 +47,7 @@ services:
     volumes:
       - ../:/app
       - static_files:/app/staticfiles
+      - media_files:/app/mediafiles    # ← volume para imagens dos produtos
     ports:
       - "8000:8000"
     env_file:
@@ -56,6 +57,7 @@ services:
 
 volumes:
   static_files:
+  media_files:
 
 networks:
   app_network:

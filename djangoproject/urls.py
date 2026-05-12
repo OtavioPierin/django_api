@@ -1,25 +1,16 @@
-"""
-URL configuration for djangoproject project.
-
-The `urlpatterns` list routes URLs to views. For more information please see:
-    https://docs.djangoproject.com/en/6.0/topics/http/urls/
-Examples:
-Function views
-    1. Add an import:  from my_app import views
-    2. Add a URL to urlpatterns:  path('', views.home, name='home')
-Class-based views
-    1. Add an import:  from other_app.views import Home
-    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
-Including another URLconf
-    1. Import the include() function: from django.urls import include, path
-    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
-"""
+# djangoproject/urls.py
 
 from django.contrib import admin
 from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static   # ← serve arquivos de mídia em dev
 
 urlpatterns = [
-    path('admin/',  admin.site.urls),
-    path('api/',    include('djangoapp.urls')),  # todos os endpoints sob /api/
+    path('admin/', admin.site.urls),
+    path('api/',   include('djangoapp.urls')),
 ]
 
+# Em desenvolvimento, o Django serve os arquivos de mídia diretamente.
+# Em produção o Nginx assume essa responsabilidade (ver nginx.conf).
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

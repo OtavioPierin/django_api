@@ -1,6 +1,6 @@
 """
 Ordem de declaração respeita as dependências entre tabelas:
-    Categoria → Produto
+    Categoria → Produto → ProdutoImagem
     Pagamento
     Cliente → Endereco
     Pedido (FK: Cliente, Pagamento) → ItensPedido
@@ -8,27 +8,44 @@ Ordem de declaração respeita as dependências entre tabelas:
 """
 
 import hashlib
+import os
 
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.db.models import Sum
+from django.db.models import Sum, Avg
 from django.contrib.auth.models import User
 
-#CATEGORIA
+
+def produto_imagem_path(instance, filename):
+    """
+    Salva em: media/produtos/<id_produto>/<filename>
+    instance pode ser ProdutoImagem — por isso usamos instance.produto_id
+    """
+    ext      = filename.rsplit('.', 1)[-1].lower()
+    nome     = f"{filename.rsplit('.', 1)[0]}.{ext}"
+    produto_id = getattr(instance, 'produto_id', None) or 'tmp'
+    return os.path.join('produtos', str(produto_id), nome)
+
+
+# =============================================================================
+# CATEGORIA
+# =============================================================================
 class Categoria(models.Model):
     nome = models.CharField(max_length=20)
 
     class Meta:
-        db_table = "categorias"
-        verbose_name = "Categoria"
+        db_table        = "categorias"
+        verbose_name    = "Categoria"
         verbose_name_plural = "Categorias"
-        ordering = ["nome"]
+        ordering        = ["nome"]
 
     def __str__(self) -> str:
         return self.nome
 
 
-#PRODUTO
+# =============================================================================
+# PRODUTO
+# =============================================================================
 class Produto(models.Model):
     nome_produto = models.CharField(max_length=50)
     preco        = models.DecimalField(max_digits=10, decimal_places=2)
@@ -40,28 +57,35 @@ class Produto(models.Model):
     )
 
     class Meta:
-        db_table = "produto"
-        verbose_name = "Produto"
+        db_table        = "produto"
+        verbose_name    = "Produto"
         verbose_name_plural = "Produtos"
-        ordering = ["nome_produto"]
-        indexes = [
+        ordering        = ["nome_produto"]
+        indexes         = [
             models.Index(fields=["categoria"], name="idx_produto_categoria"),
         ]
 
     def __str__(self) -> str:
         return self.nome_produto
 
-    
+    # ------------------------------------------------------------------
+    # Propriedades de imagem
+    # ------------------------------------------------------------------
+    @property
+    def imagem_principal(self):
+        """Retorna a imagem marcada como principal, ou a primeira disponível."""
+        imagem = self.imagens.filter(principal=True).first()
+        if not imagem:
+            imagem = self.imagens.first()
+        return imagem
+
+    # ------------------------------------------------------------------
     # Métodos de negócio
+    # ------------------------------------------------------------------
     def em_estoque(self) -> bool:
-        """True se plmns uma unidade disponível."""
         return self.estoque > 0
 
     def reduzir_estoque(self, quantidade: int) -> None:
-        """
-        -- o estoque após uma venda.
-        ValueError se a quantidade pedida maior q o estoque.
-        """
         if quantidade <= 0:
             raise ValueError("A quantidade deve ser maior que zero.")
         if quantidade > self.estoque:
@@ -73,26 +97,77 @@ class Produto(models.Model):
         self.save(update_fields=["estoque"])
 
     def media_avaliacoes(self) -> float | None:
-        """média das notas de avaliação do produto."""
-        resultado = self.avaliacoes.aggregate(media=models.Avg("nota"))
+        resultado = self.avaliacoes.aggregate(media=Avg("nota"))
         return resultado["media"]
 
 
-#PAGAMENTO
-class Pagamento(models.Model):
+# =============================================================================
+# PRODUTO IMAGEM  — múltiplas imagens por produto
+# =============================================================================
+class ProdutoImagem(models.Model):
+    produto   = models.ForeignKey(
+        Produto,
+        on_delete=models.CASCADE,    # apaga as imagens junto com o produto
+        related_name="imagens",
+    )
+    imagem    = models.ImageField(upload_to=produto_imagem_path)
+    principal = models.BooleanField(
+        default=False,
+        help_text="Marque como True para exibir no card da listagem.",
+    )
+    ordem     = models.PositiveIntegerField(
+        default=0,
+        help_text="Ordem de exibição no carrossel do detalhe (menor = primeiro).",
+    )
+    alt       = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text="Texto alternativo para acessibilidade (alt da tag <img>).",
+    )
 
+    class Meta:
+        db_table        = "produto_imagens"
+        verbose_name    = "Imagem do Produto"
+        verbose_name_plural = "Imagens do Produto"
+        ordering        = ["ordem", "id"]   # galeria sempre na mesma ordem
+
+    def __str__(self) -> str:
+        flag = " [principal]" if self.principal else ""
+        return f"Imagem #{self.id} — {self.produto.nome_produto}{flag}"
+
+    def save(self, *args, **kwargs) -> None:
+        """
+        Garante que apenas uma imagem por produto seja marcada como principal.
+        Se esta for marcada, desmarca as outras.
+        """
+        if self.principal:
+            ProdutoImagem.objects.filter(
+                produto=self.produto, principal=True
+            ).exclude(pk=self.pk).update(principal=False)
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        """Remove o arquivo físico ao deletar o registro."""
+        if self.imagem and os.path.isfile(self.imagem.path):
+            os.remove(self.imagem.path)
+        super().delete(*args, **kwargs)
+
+
+# =============================================================================
+# PAGAMENTO
+# =============================================================================
+class Pagamento(models.Model):
     METODO_CHOICES = [
         ("pix",            "PIX"),
         ("cartao_credito", "Cartão de Crédito"),
         ("cartao_debito",  "Cartão de Débito"),
         ("boleto",         "Boleto Bancário"),
     ]
-
     metodo = models.CharField(max_length=45, choices=METODO_CHOICES)
     valor  = models.DecimalField(max_digits=10, decimal_places=2)
 
     class Meta:
-        db_table = "pagamentos"
+        db_table     = "pagamentos"
         verbose_name = "Pagamento"
         verbose_name_plural = "Pagamentos"
 
@@ -100,68 +175,70 @@ class Pagamento(models.Model):
         return f"{self.get_metodo_display()} — R$ {self.valor:.2f}"
 
 
-#CLIENTE
+# =============================================================================
+# CLIENTE
+# =============================================================================
 class Cliente(models.Model):
-    user  = models.OneToOneField(
-        User,
-        on_delete=models.CASCADE,
-        related_name="cliente",
-        null=True, blank=True,
-    )    
+    ROLE_CHOICES = [
+        ('cliente', 'Cliente'),
+        ('admin',   'Administrador'),
+        ('estoque', 'Gestor de Estoque'),
+    ]
+    user  = models.OneToOneField(User, on_delete=models.CASCADE, related_name='cliente')
     nome  = models.CharField(max_length=90)
     cpf   = models.CharField(max_length=14, unique=True)
     email = models.EmailField(max_length=120, unique=True)
+    role  = models.CharField(max_length=20, choices=ROLE_CHOICES, default='cliente')
 
     class Meta:
-        db_table = "clientes"
-        verbose_name = "Cliente"
+        db_table        = "clientes"
+        verbose_name    = "Cliente"
         verbose_name_plural = "Clientes"
-        ordering = ["nome"]
+        ordering        = ["nome"]
+
+    def is_admin(self) -> bool:
+        return self.role == 'admin'
+
+    def is_gestor_estoque(self) -> bool:
+        return self.role in ['admin', 'estoque']
 
     def __str__(self) -> str:
         return f"{self.nome} ({self.email})"
 
-    #Métodos de negócio
-    def pedido_mais_recente(self) -> "Pedido | None":
-        """Retorna o pedido mais recente do cliente, ou None."""
+    def pedido_mais_recente(self):
         return self.pedidos.order_by("-data_pedido").first()
 
     def total_gasto(self):
-        """Soma o valor_total de todos os pedidos do cliente."""
         return self.pedidos.aggregate(total=Sum("valor_total"))["total"] or 0
 
     def pedidos_por_status(self, status: str):
-        """Filtra os pedidos por status."""
         return self.pedidos.filter(status=status)
 
 
-#ENDERECO
+# =============================================================================
+# ENDERECO
+# =============================================================================
 class Endereco(models.Model):
-    cliente = models.ForeignKey(
-        Cliente,
-        on_delete=models.CASCADE,       # endereços são excluídos com o cliente
-        related_name="enderecos",
-    )
-    rua    = models.CharField(max_length=50)
-    cidade = models.CharField(max_length=30)
-    estado = models.CharField(max_length=2)   # UF: 'MG', 'SP', etc.
-    cep    = models.CharField(max_length=10)  # CharField preserva zeros à esquerda
+    cliente = models.ForeignKey(Cliente, on_delete=models.CASCADE, related_name="enderecos")
+    rua     = models.CharField(max_length=50)
+    cidade  = models.CharField(max_length=30)
+    estado  = models.CharField(max_length=2)
+    cep     = models.CharField(max_length=10)
 
     class Meta:
-        db_table = "enderecos"
+        db_table     = "enderecos"
         verbose_name = "Endereço"
         verbose_name_plural = "Endereços"
-        indexes = [
-            models.Index(fields=["cliente"], name="idx_enderecos_cliente"),
-        ]
+        indexes      = [models.Index(fields=["cliente"], name="idx_enderecos_cliente")]
 
     def __str__(self) -> str:
         return f"{self.rua}, {self.cidade}/{self.estado} — CEP {self.cep}"
 
 
-#PEDIDO
+# =============================================================================
+# PEDIDO
+# =============================================================================
 class Pedido(models.Model):
-
     STATUS_CHOICES = [
         ("pendente",    "Pendente"),
         ("processando", "Processando"),
@@ -169,33 +246,19 @@ class Pedido(models.Model):
         ("entregue",    "Entregue"),
         ("cancelado",   "Cancelado"),
     ]
-
-    cliente     = models.ForeignKey(
-        Cliente,
-        on_delete=models.PROTECT,
-        related_name="pedidos",
-    )
-    pagamento   = models.ForeignKey(
-        Pagamento,
-        on_delete=models.PROTECT,
-        related_name="pedidos",
-    )
+    cliente     = models.ForeignKey(Cliente,   on_delete=models.PROTECT, related_name="pedidos")
+    pagamento   = models.ForeignKey(Pagamento, on_delete=models.PROTECT, related_name="pedidos")
     data_pedido = models.DateField(auto_now_add=True)
     valor_total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-    status      = models.CharField(
-        max_length=20,
-        choices=STATUS_CHOICES,
-        default="pendente",
-    )
-    # PIN de rastreio — armazenado como SHA-256
-    senha = models.CharField(max_length=200)
+    status      = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pendente")
+    senha       = models.CharField(max_length=200)
 
     class Meta:
-        db_table = "pedidos"
+        db_table     = "pedidos"
         verbose_name = "Pedido"
         verbose_name_plural = "Pedidos"
-        ordering = ["-data_pedido"]
-        indexes = [
+        ordering     = ["-data_pedido"]
+        indexes      = [
             models.Index(fields=["cliente"], name="idx_pedidos_cliente"),
             models.Index(fields=["status"],  name="idx_pedidos_status"),
         ]
@@ -203,28 +266,17 @@ class Pedido(models.Model):
     def __str__(self) -> str:
         return f"Pedido #{self.pk} — {self.cliente.nome} [{self.get_status_display()}]"
 
-    # Sobrescrita de save — hash da senha antes de persistir
     def save(self, *args, **kwargs) -> None:
-        """
-        Aplica SHA-256 na senha antes de salvar, apenas se ainda não
-        estiver em formato hexadecimal de 64 caracteres.
-        """
         if self.senha and len(self.senha) != 64:
             self.senha = hashlib.sha256(self.senha.encode()).hexdigest()
         super().save(*args, **kwargs)
 
-    # Métodos de negócio
     def calcular_total(self) -> None:
-        """
-        Recalcula valor_total somando quantidade*preco_unitario
-        de todos os itens do pedido.
-        """
         total = sum(item.subtotal for item in self.itens.all())
         self.valor_total = total
         self.save(update_fields=["valor_total"])
 
     def cancelar(self) -> None:
-        """Cancela o pedido e volta o estoque de cada item."""
         if self.status == "entregue":
             raise ValueError("Pedidos já entregues não podem ser cancelados.")
         for item in self.itens.all():
@@ -234,36 +286,29 @@ class Pedido(models.Model):
         self.save(update_fields=["status"])
 
     def avancar_status(self) -> None:
-        """Avança o pedido para o próximo status na sequência."""
         fluxo = ["pendente", "processando", "enviado", "entregue"]
         if self.status not in fluxo:
-            raise ValueError(f"Pedido com status '{self.status}' não pode ser avançado.")
+            raise ValueError(f"Status '{self.status}' não pode ser avançado.")
         idx = fluxo.index(self.status)
         if idx < len(fluxo) - 1:
             self.status = fluxo[idx + 1]
             self.save(update_fields=["status"])
 
 
-#ITENS DO PEDIDO
+# =============================================================================
+# ITENS DO PEDIDO
+# =============================================================================
 class ItensPedido(models.Model):
-    pedido         = models.ForeignKey(
-        Pedido,
-        on_delete=models.CASCADE,       # itens são excluídos com o pedido
-        related_name="itens",
-    )
-    produto        = models.ForeignKey(
-        Produto,
-        on_delete=models.PROTECT,
-        related_name="itens_pedido",
-    )
+    pedido         = models.ForeignKey(Pedido,  on_delete=models.CASCADE,  related_name="itens")
+    produto        = models.ForeignKey(Produto, on_delete=models.PROTECT,  related_name="itens_pedido")
     quantidade     = models.IntegerField()
     preco_unitario = models.DecimalField(max_digits=10, decimal_places=2)
 
     class Meta:
-        db_table = "itens_pedido"
+        db_table     = "itens_pedido"
         verbose_name = "Item do Pedido"
         verbose_name_plural = "Itens do Pedido"
-        indexes = [
+        indexes      = [
             models.Index(fields=["pedido"],  name="idx_itens_pedido"),
             models.Index(fields=["produto"], name="idx_itens_produto"),
         ]
@@ -271,88 +316,55 @@ class ItensPedido(models.Model):
     def __str__(self) -> str:
         return f"{self.quantidade}× {self.produto.nome_produto} (Pedido #{self.pedido_id})"
 
-    # Properties
     @property
     def subtotal(self):
-        """Retorna o valor total do item (quantidade × preço unitário)."""
         return self.quantidade * self.preco_unitario
 
-    # Sobrescrita de save — reduz estoque ao criar o item
     def save(self, *args, **kwargs) -> None:
-        """Reduz o estoque do produto automaticamente na criação do item."""
-        is_new = self._state.adding
-        if is_new:
+        if self._state.adding:
             self.produto.reduzir_estoque(self.quantidade)
         super().save(*args, **kwargs)
 
 
-#AVALIACAO
+# =============================================================================
+# AVALIACAO
+# =============================================================================
 class Avaliacao(models.Model):
-    cliente    = models.ForeignKey(
-        Cliente,
-        on_delete=models.PROTECT,
-        related_name="avaliacoes",
-    )
-    produto    = models.ForeignKey(
-        Produto,
-        on_delete=models.PROTECT,
-        related_name="avaliacoes",
-    )
-    nota       = models.FloatField(
-        validators=[MinValueValidator(0.0), MaxValueValidator(5.0)]
-    )
+    cliente    = models.ForeignKey(Cliente, on_delete=models.PROTECT, related_name="avaliacoes")
+    produto    = models.ForeignKey(Produto, on_delete=models.PROTECT, related_name="avaliacoes")
+    nota       = models.FloatField(validators=[MinValueValidator(0.0), MaxValueValidator(5.0)])
     comentario = models.CharField(max_length=100)
-
-    # Relação m para n com Categoria via entidade intermediária
     categorias = models.ManyToManyField(
-        Categoria,
-        through="AvaliacaoCategoria",
-        related_name="avaliacoes",
-        blank=True,
+        Categoria, through="AvaliacaoCategoria", related_name="avaliacoes", blank=True,
     )
 
     class Meta:
-        db_table = "avaliacoes"
-        verbose_name = "Avaliação"
+        db_table        = "avaliacoes"
+        verbose_name    = "Avaliação"
         verbose_name_plural = "Avaliações"
-        # Garante que um cliente avalie um produto apenas uma vez
         unique_together = ("cliente", "produto")
-        indexes = [
-            models.Index(fields=["produto"], name="idx_avaliacoes_produto"),
-        ]
+        indexes         = [models.Index(fields=["produto"], name="idx_avaliacoes_produto")]
 
     def __str__(self) -> str:
-        return (
-            f"Avaliação de {self.cliente.nome} — "
-            f"{self.produto.nome_produto}: {self.nota}/5"
-        )
+        return f"Avaliação de {self.cliente.nome} — {self.produto.nome_produto}: {self.nota}/5"
 
 
-#PRODUTO_AVALIACOES  (M,N explícita — produto <-> avaliacao)
+# =============================================================================
+# M2M EXPLÍCITAS
+# =============================================================================
 class ProdutoAvaliacao(models.Model):
     produto   = models.ForeignKey(Produto,   on_delete=models.CASCADE)
     avaliacao = models.ForeignKey(Avaliacao, on_delete=models.CASCADE)
 
     class Meta:
-        db_table = "produto_avaliacoes"
-        verbose_name = "Produto × Avaliação"
-        verbose_name_plural = "Produtos × Avaliações"
+        db_table        = "produto_avaliacoes"
         unique_together = ("produto", "avaliacao")
 
-    def __str__(self) -> str:
-        return f"{self.produto} ↔ Avaliação #{self.avaliacao_id}"
 
-
-#AVALIACOES_CATEGORIAS  (M,N explícita — avaliacao <-> categoria)
 class AvaliacaoCategoria(models.Model):
     avaliacao = models.ForeignKey(Avaliacao, on_delete=models.CASCADE)
     categoria = models.ForeignKey(Categoria, on_delete=models.CASCADE)
 
     class Meta:
-        db_table = "avaliacoes_categorias"
-        verbose_name = "Avaliação × Categoria"
-        verbose_name_plural = "Avaliações × Categorias"
+        db_table        = "avaliacoes_categorias"
         unique_together = ("avaliacao", "categoria")
-
-    def __str__(self) -> str:
-        return f"Avaliação #{self.avaliacao_id} ↔ {self.categoria}"
