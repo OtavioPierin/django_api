@@ -1,53 +1,21 @@
-# services:
-#   djangoapp:
-#     container_name: djangoapp
-#     build: .
-#     ports:
-#       - "8000:8000"
-#     environment:
-#       - PG_USER=postgres
-#       - PG_PASSWORD=postgres
-#       - PG_DB=postgres
-#       - PG_HOST=db
-#       - PG_PORT=5432 # <-- 5432. O Django acessa o banco internamente.
-#     depends_on:
-#       - db
-#     volumes:
-#       - .:/app      
-
-#   db:
-#     container_name: db
-#     image: postgres:latest
-#     environment:
-#       - POSTGRES_USER=postgres
-#       - POSTGRES_PASSWORD=postgres
-#       - POSTGRES_DB=postgres
-#       - PGDATA=/var/lib/postgresql/data/pgdata
-#     ports:
-#       - "5433:5432" # <-- 5433 no seu PC, 5432 no container.
-#     volumes:
-#       - pgdata:/var/lib/postgresql
-
-# volumes:
-#   pgdata: {}
-
 # backend/docker-compose.yml
 
 services:
+
   backend:
     build:
-      context: ..
+      context: ..           # raiz do projeto (onde está o Dockerfile e o manage.py)
       dockerfile: Dockerfile
     container_name: django_backend
     restart: always
     command: >
-      sh -c "python manage.py migrate &&
+      sh -c "python manage.py migrate --noinput &&
              python manage.py collectstatic --noinput &&
-             gunicorn djangoproject.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+             gunicorn djangoproject.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120"
     volumes:
-      - ../:/app
-      - static_files:/app/staticfiles
-      - media_files:/app/mediafiles    # ← volume para imagens dos produtos
+      - ../:/app                        # código-fonte mapeado para dentro do container
+      - static_files:/app/staticfiles   # arquivos estáticos persistentes
+      - media_files:/app/mediafiles     # imagens dos produtos persistentes
     ports:
       - "8000:8000"
     env_file:
@@ -61,5 +29,5 @@ volumes:
 
 networks:
   app_network:
-    name: app_network      # mesmo nome — Docker conecta os containers automaticamente
-    external: true         # declara que a rede já foi criada pelo compose do banco
+    name: app_network
+    external: true          # rede criada pelo compose do banco; aqui só reutilizamos
